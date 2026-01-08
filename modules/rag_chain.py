@@ -18,6 +18,7 @@ class AutomotiveRAGChain:
         self.llm = self._init_llm()
         # 构建RAG提示词模板（适配汽车行业标准问答，强调严谨性）
         self.cross_encoder = CrossEncoder(settings.CROSS_ENCODER_MODEL_PATH)
+        # self.cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L6-v2")
         self.prompt_template = PromptTemplate(
             template="""
             你是汽车行业标准智能问答助手，需基于以下提供的汽车行业标准文档内容，严谨、准确地回答用户问题。
@@ -82,7 +83,7 @@ class AutomotiveRAGChain:
 
         # 步骤3：构建上下文
         context = "\n\n".join([
-            f"【文档来源：{doc.metadata['file_name']}，相似度：{doc.metadata.get('bert_similarity_score', 0):.4f}】\n{doc.page_content}"
+            f"【文档来源：{doc.metadata['file_name']}，相似度：{doc.metadata.get('cross_score', 0):.4f}】\n{doc.page_content}"
             for doc in reranked_docs
         ])
 
@@ -98,7 +99,7 @@ class AutomotiveRAGChain:
             "sources": [
                 {
                     "file_name": doc.metadata["file_name"],
-                    "similarity_score": doc.metadata.get("bert_similarity_score", 0),
+                    "similarity_score": doc.metadata.get("cross_score", 0),
                     "content": doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
                 }
                 for doc in reranked_docs

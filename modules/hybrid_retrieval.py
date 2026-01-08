@@ -8,6 +8,9 @@ from modules.doc_processor import AutomotiveDocProcessor
 import os
 from transformers import BitsAndBytesConfig
 import torch
+from langchain_community.vectorstores.utils import filter_complex_metadata
+
+
 
 
 class HybridRetrieval:
@@ -33,18 +36,21 @@ class HybridRetrieval:
 
     def _initialize_new_database(self):
         """初始化新的数据库"""
+        print("--初始化新的数据库--")
         # 1. 初始化文档处理器（获取汽车标准文本块）
         self.doc_processor = AutomotiveDocProcessor()
         self.text_chunks = []  # 文本块内容列表
         self.chunk_ids = []    # 文本块唯一ID列表
         self.chunk_metadata = []  # 文本块元数据（文件名、页码等）
+
         self._load_and_preprocess_docs()
 
         # 2. 构建BM25索引（中文需先分词）
         self.tokenized_corpus = [self._chinese_tokenize(chunk) for chunk in self.text_chunks]
         self.bm25 = BM25Okapi(self.tokenized_corpus)
         if torch.cuda.is_available() :
-            torch.cuda.set_device(settings.TRAIN_GPU_IDS)
+            gpu_id = settings.TRAIN_GPU_IDS[0] if isinstance(settings.TRAIN_GPU_IDS, list) else settings.TRAIN_GPU_IDS
+            torch.cuda.set_device(gpu_id)
         self.embeddings = HuggingFaceEmbeddings(
             model_name=settings.EMBEDDING_MODEL_NAME,
             model_kwargs={
@@ -72,9 +78,15 @@ class HybridRetrieval:
                 ids=self.chunk_ids,
                 metadatas=self.chunk_metadata
             )
+            count = self.vector_db._collection.count()
+            print(f"向量数据库中文档数量: {count}")
+            if count == 0:
+                print("警告：向量数据库为空")
+                return []
 
     def _load_existing_database(self):
         """加载已存在的向量数据库"""
+        print("--加载已存在的向量数据库--")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=settings.EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cuda"}
@@ -99,6 +111,60 @@ class HybridRetrieval:
             print("错误: 无法使用空语料库初始化 BM25 模型。")
             self.bm25 = None
 
+    # def _load_docs_from_vector_db(self):
+    #     """从向量数据库加载文档，避免重新处理PDF"""
+    #     try:
+    #         # 获取向量数据库中的所有文档
+    #         collection = self.vector_db._collection
+    #         if collection:
+    #             # 获取所有文档
+    #             results = collection.get(include=["documents", "metadatas"])
+    #
+    #             if results and "documents" in results:
+    #                 self.text_chunks = results["documents"]
+    #                 self.chunk_metadata = results.get("metadatas", [])
+    #
+    #                 # 重新生成chunk_ids
+    #                 self.chunk_ids = []
+    #                 for i, metadata in enumerate(self.chunk_metadata):
+    #                     chunk_id = str(uuid.uuid4())
+    #                     self.chunk_ids.append(chunk_id)
+    #                     # 确保metadata中包含chunk_id
+    #                     if metadata and isinstance(metadata, dict):
+    #                         metadata["chunk_id"] = chunk_id
+    #
+    #                 print(f"从向量数据库加载了 {len(self.text_chunks)} 个文档块")
+    #             else:
+    #                 print("向量数据库中没有文档")
+    #     except Exception as e:
+    #         print(f"从向量数据库加载文档失败: {e}")
+    #         self.text_chunks = []
+    #         self.chunk_ids = []
+    #         self.chunk_metadata = []
+    #
+    def _filter_metadata(self, metadata):
+        """
+        过滤元数据，只保留Chroma支持的数据类型
+        """
+        if not isinstance(metadata, dict):
+            return {}
+
+        filtered = {}
+        for key, value in metadata.items():
+            # 只保留支持的数据类型：str, int, float, bool, None
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                filtered[key] = value
+            elif isinstance(value, list):
+                # 对于列表，转换为字符串存储
+                filtered[key] = str(value)
+            elif isinstance(value, dict):
+                # 对于嵌套字典，递归过滤
+                filtered[key] = self._filter_metadata(value)
+            else:
+                # 不支持的类型转换为字符串
+                filtered[key] = str(value)
+
+        return filtered
 
     def _load_and_preprocess_docs(self):
         """加载汽车标准PDF，预处理为文本块并分配唯一ID"""
@@ -115,7 +181,9 @@ class HybridRetrieval:
                 chunk_id = str(uuid.uuid4())
                 self.chunk_ids.append(chunk_id)
                 self.text_chunks.append(doc.page_content)
-                self.chunk_metadata.append(doc.metadata)
+                # 过滤元数据后再添加
+                filtered_metadata = self._filter_metadata(doc.metadata)
+                self.chunk_metadata.append(filtered_metadata)
 
     def _chinese_tokenize(self, text):
         """中文分词（适配BM25，去除停用词）"""
@@ -143,6 +211,20 @@ class HybridRetrieval:
 
     def retrieve_vector(self, query, k=settings.RETRIEVE_TOP_K):
         """向量检索（沿用原有逻辑）"""
+        # 添加调试信息
+        if not hasattr(self, 'vector_db') or self.vector_db is None:
+            print("错误：向量数据库未正确初始化")
+            return []
+
+        # 检查数据库中是否有文档
+        try:
+            count = self.vector_db._collection.count()
+            print(f"向量数据库中文档数量: {count}")
+            if count == 0:
+                print("警告：向量数据库为空")
+                return []
+        except Exception as e:
+            print(f"检查数据库文档数量时出错: {e}")
         vector_docs = self.vector_db.similarity_search_with_score(query, k=k)
         # 构造结果：(chunk_id, text, metadata, vector_score)
         vector_results = [
